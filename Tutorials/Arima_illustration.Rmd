@@ -1,0 +1,185 @@
+--- 
+title: Testing ARIMA model goodness for different sample sizes
+author: Dr. Konrad Hoppe
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight:: github
+---
+
+```{r include=FALSE}
+library(rmarkdown)
+library(prettydoc)
+setwd("C:\\Users\\KHoppe\\Documents\\GitHub\\Data-Science-and-Operations-Research\\Tutorials")
+```
+
+## Goals and contents
+ARIMA timeseries models are often taught in econometrics courses as part of the regular business science curriculum and are thus put to use by sometimes inexperienced data scientists. 
+
+The intention of these code snippets is to understand the data generating process behind simple MA(1) models and illustrate weakness of the estimators at small sample sizes.
+
+## Result
+
+For the tested MA(1) model with coefficient beta=0.3, a time series length of at least 5000 observations is necessary to reach a sufficiently narrower confidence interval.
+
+The impact on the forecast goodness is evaluated and depends critically on the estimated coefficient.
+
+## The code
+
+Install some libraries first:
+
+```{r}
+#for confidence intervals and testing
+library(lmtest)
+#for plotting
+library(ggplot2)
+```
+
+Now generate some data from the process. This is better than using real-word data since we know in this laboratory setting what we are aiming at: 50 observations, simple MA(1) model with coefficient $\beta=0.3$:
+
+```{r}
+n <- 50
+beta <- 0.3
+eps <- rnorm(n)
+x <- vector(length = n)
+x[1] <- eps[1]
+for(i in 2:n){
+  x[i] <- eps[i]+beta*eps[i-1]
+}
+```
+
+Now, lets do the fit and see whether the coefficient that was used to generate the data, is uncovered:
+
+```{r}
+#do the fitting
+fit <- arima(x,order=c(0,0,1),include.mean=FALSE)
+coeftest(fit)
+#confidence interval around it:
+confint(fit, parm=c("ma1"), level=0.95)
+```
+The confidence interval is rather wide after 50 observations and the estimator slightly off. Let us investigate how fast this improves: How long does the series need to be to wrap the confidence interval tight around the input parameter $\beta=0.3$
+
+```{r}
+# generate a grid for different process lengths:
+n.grid <- round(1.3^(2:40))
+summary(n.grid)
+n.length <- length(n.grid)
+#reserve some space for the results
+uppers <- vector(length = n.length)
+lowers <- vector(length = n.length)
+estimates <- vector(length = n.length)
+counter <- 1
+#iterate through the different process lengths and save the estimator
+#as well as the confidence interval boundaries:
+for(n in n.grid){
+  #generate the data:
+  eps <- rnorm(n)
+  x <- vector(length = n)
+  x[1] <- eps[1]
+  for(i in 2:n){
+    x[i] <- eps[i]+beta*eps[i-1]
+  }
+  fit <- arima(x,order=c(0,0,1),include.mean = FALSE)
+  conf <- confint(fit, parm=c("ma1"), level=0.95)
+  estimates[counter] <-  fit$coef[1]
+  uppers[counter] <- conf[2]
+  lowers[counter] <- conf[1]
+  
+  counter <- counter+1
+}
+
+#now plot
+results.df <- data.frame(grid=n.grid, lowers,uppers,estimates)
+ggplot(results.df) + 
+  geom_line(aes(grid,estimates))+
+  geom_abline(slope=0,intercept = beta, linetype="dashed")+
+  geom_ribbon(aes(x=grid, ymin=lowers,ymax=uppers),alpha=0.2)+
+  coord_cartesian(ylim=c(0.15,0.45))+
+  theme_minimal()
+```
+
+Curiously, the "true" value is not even reached for large number of observations. Let's see whether this is spurious or whether there is an estimation bias by averaging over a number of estimates with the same number of observations:
+
+```{r}
+n <- 5000
+n.reps <- 2000
+coeffs <- vector(length=n.reps)
+
+for(j in 1:n.reps){
+  #generate the data:
+  eps <- rnorm(n)
+  x <- vector(length = n)
+  x[1] <- eps[1]
+  for(i in 2:n){
+    x[i] <- eps[i]+beta*eps[i-1]
+  }
+  fit <- arima(x,order=c(0,0,1), include.mean = FALSE)
+  coeffs[j] <- fit$coef[1]
+}
+
+summary(coeffs)
+```
+So as expected, estimator is unbiased for large number of repititions.
+
+## Implications
+
+Does it matter that the the number of observations need to be large to get sufficiently tight confidence intervals? What is the difference of a coefficient of $\beta=0.3$ and $\beta=0.35$, since it anyway refers to unobserved random shocks in the past?
+
+We will investigate the forecasting ability under these circumstances:
+
+```{r}
+n <- 50000
+eps <- rnorm(n)
+x <- vector(length = n)
+x[1] <- eps[1]
+for(i in 2:n){
+  x[i] <- eps[i]+beta*eps[i-1]
+}
+#fit the MA(1) model to the process:
+fit <- arima(x,order=c(0,0,1),include.mean=FALSE)
+#generate the 5 step prediction:
+predict(fit, n.ahead=5)
+```
+
+### Excursus: Forecasting MA models
+
+It's curious that the forecast of aboves model breaks off after one period. Let us quickly investigate what is going on here. 
+
+The MA(1) model in its simplest form as we are using it, is given by
+$$X_t=\epsilon_t + \beta \epsilon_{t-1}$$
+Thus, the one period forecast is given by
+$$E[X_{t+1}|I_t]=E[\epsilon_{t+1}|I_t] + \beta E[\epsilon_t|I_t]$$
+All forecasts conditional on the past $I_t=\{X_1,\dots X_t,\epsilon_1,\dots,\epsilon_t\}$. Basic assumption of the MA(p) process is that the error terms are $\epsilon_t$ iid. with $\epsilon_t\sim N(0,\sigma^2)$. Thus,$E[\epsilon_{t+1}|I_t]=0$. $\epsilon_t|I_t$, however can be calculated recursively. Therefore, rewrite the process description $X_t$ using Lag-operator notation:
+$$X_t=(1+\beta L)\epsilon_t$$
+and thus
+$$\epsilon_t=\frac{X_t}{1+\beta L}$$
+Notice now that the series expansion of $1/(1-x)=1+x+x^2+x^3+\cdots$ can be transformed by replacing $x$ with $-x$ to
+$$\frac{1}{1+x} = 1-x+x^2-x^3+\cdots$$
+thus, we can calculate $\epsilon_t|I_t$:
+$$\epsilon_t=X_t(1-\beta L + \beta^2 L^2 - \cdots)= X_t - \beta X_{t-1} + \beta^2 X_{t-2} -\cdots$$
+Since we know the series of $\{X_t\}$, we can also calcuate the unobserved series of $\{\epsilon_t\}$. Notice further that an MA(1) process can only be forecasted one step, since
+$$E[X_{t+2}|I_t]=E[\epsilon_{t+2}|I_t] + \beta E[\epsilon_{t+1}|I_t]=0+0$$
+This is because the random error terms are independently distributed. 
+
+Let us come back to the starting point. The reason we went down this excursus was to understand whether the predictor quality is actually an issue in forecasting MA(1) models. In our concrete case, the difference between $\beta=0.3$ and $\beta=0.35$ can be calculated:
+
+```{r}
+beta03.vec <- (-0.3)^(0:(n-1)) 
+beta035.vec <- (-0.35)^(0:(n-1))
+
+#one step forecast:
+(X03 <- sum(beta03.vec*rev(x))*0.3)
+(X035 <- sum(beta035.vec*rev(x))*0.35)
+
+#percentage error:
+X035/X03-1
+```
+
+So the forecast deviates by $\sim 12\%$ when the $\beta$ is slightly different estimated.
+
+## Takeaways
+
+* $MA(p)$ models can only be forecasted for $p$ periods.
+* Although only one parameter is estimated, these models need sufficient sample sizes for narrow confidence intervals
+* It is important to review confidence intervals width and investigate the impact on forecast quality 
+* For classical operations research tasks, there are better fitting models: often volume curves can be predicted better by investigating the underlying drivers of the curve, rather than following a purely univariate time series approach.
