@@ -1,0 +1,181 @@
+---
+title: "Forecasting at scale"
+author: "Dr. Konrad Hoppe"
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight:: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rmarkdown)
+library(prettydoc)
+setwd("C:\\Users\\KHoppe\\Documents\\GitHub\\Data-Science-and-Operations-Research\\docs\\Tutorials\\")
+```
+
+# Background
+
+Time series forecasting is usually a complex task, because the structure of already univariate data often contains many unobserved factors. Standard models such as [ARIMA](https://en.wikipedia.org/wiki/Autoregressive_integrated_moving_average), or filters, e.g. [Kalman Filter](https://en.wikipedia.org/wiki/Kalman_filter) are complex models that often need tweeking which requires a rigor understanding of the underlying theory.
+
+Practioners with good domain knowledge but little statistics know-how want to make use of machine learning and forecasting methodologies to inform their business decisions. So a number of software package and libraries attempt to bridge this gap by offering automatized solutions.
+
+The aim of this article is to invetigate a promising library by Facebook, called [Prophet](https://facebook.github.io/prophet/). The promise of Prophet is to generate forecasts automatically at scale.
+
+# Results
+
+Unfortunately, the hopes that an engine can do reliable forecasts at scale without any interaction were too high, even under laboratory circumstances. After some tweaking however, the library performs well and recognizes all the elements that were put into the data. So with having a little knowledge on the field, the library produces useful results
+
+# The code
+
+To set things up, load the forecasting library, ggplot for pretty graphics and zoo for some timeseries magic. 
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(prophet)
+library(ggplot2)
+library(zoo)
+```
+
+Now generate the data. We will use 5 years of data with three different seasonal pattern and a changing trend after the first half of the time horizon.
+
+Trigonometric functions can be used to generate seasonal pattern by recognizing that $\sin(2\pi/b)$ has a cycle-length of $b$. In other words, every $b$ periods, the pattern repeats itself. We will use a yearly pattern $(b=360)$, a monthly cycle $(b=30)$, and a weekly cycle $(b=7)$. 
+
+The trend will be lifted after half of the observation horizon to test whether the FB Prophet can figure this change of strcuture out. We will see, that indeed it does well on this challenge. 
+
+Other features that the probhet can capture is trend saturation and special events, such as holidays. But these will not be adressed here
+
+```{r}
+#generate some data
+daysPerYear <- 360
+years <- 5
+nObs <- daysPerYear * years
+days <- 1:nObs
+#set a yearly cicle
+yearlyCycle <- 0.8*sin(2*pi/360*days)
+monthlyCycle <- 0.5*sin(2*pi/30*days)
+weekylCycle <- 0.3*sin(2*pi/7*days)
+seasonalComp <- yearlyCycle + monthlyCycle + weekylCycle
+#seasonalComp <- yearlyCycle + weekylCycle
+normTrend <- 0.005*days
+incTrend <- 0.01*days
+cutoff <- round(nObs/2)
+trendComp <- normTrend
+trendComp[(cutoff+1):nObs] <- incTrend[(cutoff+1):nObs]-(incTrend[cutoff]-normTrend[cutoff])
+
+#now create a timeseries:
+series <- trendComp + seasonalComp
+dates <- seq(as.Date("2014-01-01"),length=nObs,by="days")
+
+#the prophet needs a data frame with two colums ds and y for the dates and the data
+sample.data <- data.frame(ds=dates, y=series)
+
+#now cutoff the series to predict it with prophet:
+sample.cutOff <- daysPerYear*(years-1)
+sample.in <- sample.data[1:sample.cutOff,]
+```
+
+To compare in the end the real data from the model to the forecast, the data for fiting is cutoff after 4 years, so the forecast of one full year can be compared to the actual data from our laboratory model.
+
+At first, we run the Prophet without further information:
+
+```{r results='hide', message=FALSE, warning=FALSE}
+#instantiate the fit:
+fit <- prophet(sample.in)
+```
+
+To create a forecast from it, a data frame that will hold the forecast needs to be invoked.
+
+```{r}
+#now prepare the forecast:
+future <- make_future_dataframe(fit, periods = 360)
+forecast <- predict(fit, future)
+plot(fit,forecast)
+```
+
+From the plot, it's easy to grasp that the fit is not very good. The peaks of the seasons are not well captured. To get a better understanding of what is going on,let's check the residuals:
+
+```{r}
+#only of the in-sample:
+resids <- forecast$yhat[1:sample.cutOff]-sample.in$y
+plot(resids, type="l")
+```
+
+Not only, are the resdiuals quite large, also a clear structure is visible. So there is a component in the model missing. Let's try to increase the yearly seasonality:
+
+```{r results='hide', message=FALSE, warning=FALSE}
+# the weekly seasons are not properly picked up in the fourier transformation - increase the frequency:
+fit.2 <- prophet(sample.in, yearly.seasonality = 360)
+future.2 <- make_future_dataframe(fit.2, periods = 360)
+forecast.2 <- predict(fit.2,future.2)
+```
+
+And plot:
+
+```{r}
+plot(fit.2,forecast.2)
+```
+
+Looks better, but still not perfect. Keep in mind, the model data is produced without noise, so the model should be able to fit the data with almost 100% accuracy.
+
+However, the residuals show a different issue this time:
+
+```{r}
+resids.2 <- forecast.2$yhat[1:sample.cutOff]-sample.in$y
+plot(resids.2, type="l")
+```
+
+This is a prime example why domain knowledge is important. Since we know the frequencies of the underlying data, we can specify it with the parameter `r "period"`.
+
+To do that, we set up the model without seasonal component and add them manually:
+
+```{r}
+fit.3.aux <- prophet(sample.in, yearly.seasonality = FALSE, weekly.seasonality = FALSE, daily.seasonality = FALSE, fit=FALSE)
+fit.3.aux <- add_seasonality(fit.3.aux, name="yearly", period=360, fourier.order = 10, mode="additive")
+fit.3.aux <- add_seasonality(fit.3.aux, name="monthly", period=30, fourier.order = 10, mode="additive")
+fit.3.aux <- add_seasonality(fit.3.aux, name="weekly", period=7, fourier.order = 10, mode="additive")
+#now fit:
+fit.3 <- fit.prophet(fit.3.aux, sample.in)
+
+future.3 <- make_future_dataframe(fit.3, periods = 360)
+forecast.3 <- predict(fit.3,future.3)
+resids.3 <- forecast.3$yhat[1:sample.cutOff]-sample.in$y
+plot(resids.3, type="l")
+```
+
+This looks better, apart from the break that occurs around the trend change. However there is still a structure in the residuals. The problem here is overfitting. And is induced by the parameter `r "fourier.order"`. The standard value is 10. 
+
+Prophet estimates the seasonal component using a [Fourier transform](https://en.wikipedia.org/wiki/Fourier_transform). The underlying idea is that any arbitrary signal can be approximated with a sufficient number of sine curves. The fourier order parameter specifies how many should be used here. Since we have created each component only with a single sine curve, the true order is 1.
+
+So let us see what happens when we inform the Prophet about this aspect of the model:
+
+```{r}
+#since we are in laboratory circumstances, we know that the series is composed of
+#order one fourier transforms. Let us use this:
+fit.4.aux <- prophet(sample.in, yearly.seasonality = FALSE, weekly.seasonality = FALSE, daily.seasonality = FALSE, fit=FALSE)
+fit.4.aux <- add_seasonality(fit.4.aux, name="yearly", period=360, fourier.order = 1, mode="additive")
+fit.4.aux <- add_seasonality(fit.4.aux, name="monthly", period=30, fourier.order = 1, mode="additive")
+fit.4.aux <- add_seasonality(fit.4.aux, name="weekly", period=7, fourier.order = 1, mode="additive")
+#now fit:
+fit.4 <- fit.prophet(fit.4.aux, sample.in)
+
+future.4 <- make_future_dataframe(fit.4, periods = 360)
+forecast.4 <- predict(fit.4,future.4)
+resids.4 <- forecast.4$yhat[1:sample.cutOff]-sample.in$y
+plot(resids.4, type="l")
+```
+
+The residuals look now much better, apart from the disturbance in when the trend changes, but this is not surprising as it poses a sudden break for the nice regular pattern of the data.
+ 
+```{R}
+#the forecast is expectedly very good:
+check <- data.frame(id=1:360, orig=tail(series,360), pred=tail(forecast.4$yhat,360))
+ggplot(check)+geom_point(aes(id,orig), color="grey",size=2)+geom_line(aes(id, pred), col="blue")+theme_light()
+```
+
+The forecast is now perfectly in line with the real data!
+
+# Take aways
+
+Automated forecasting is a convenient feature for large scale business applications. However, these methods do not always work out of the box. We had to weave in a great amount of knowledge from the data generation process to create a good model fit.
+
+Without these insights, the model was still useful, but nevertheless not exact, although the data generation process follows exactly the same logic of the data exploration method.
